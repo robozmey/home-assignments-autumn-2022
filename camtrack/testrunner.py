@@ -261,7 +261,7 @@ def _describe_and_check_corners(corner_storage):
 
     min_corner_cnt = frame_stats[1]
     min_conn_corner_cnt = connective_stats[0]
-    median_track_len = frame_stats[1]
+    median_track_len = track_stats[1]
     corners_ok = min_corner_cnt >= CORNERS_PER_FRAME_REQUIRED and \
         min_conn_corner_cnt >= CONNECTIVE_CORNERS_PER_FRAME_REQUIRED and \
         median_track_len >= MEDIAN_TRACK_LENGTH_REQUIRED
