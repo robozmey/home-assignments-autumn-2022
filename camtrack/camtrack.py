@@ -4,6 +4,7 @@ __all__ = [
     'track_and_calc_colors'
 ]
 
+import math
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -80,6 +81,115 @@ def intersect_indexes(ids_1, ids_2):
     return i_ids_1, i_ids_2
 
 
+def triangulate_3d_point(view_mats, points_2d, intrinsic_mat):
+    equations = np.empty(shape=(2 * len(points_2d), 4), dtype=float)
+
+    for (i, (view_mat, point_2d)) in enumerate(zip(view_mats, points_2d)):
+        proj = intrinsic_mat @ view_mat
+        equations[i * 2] = proj[2] * point_2d[0] - proj[0]
+        equations[i * 2 + 1] = proj[2] * point_2d[1] - proj[1]
+
+    res = np.linalg.lstsq(equations[:, :3], -equations[:, 3], rcond=None)
+    return res[0]
+
+
+triangulation_parameters = TriangulationParameters(8.0, 0.5, 0.2)
+dist_coeffs = np.zeros((4, 1))
+
+
+def calc_view(current_frame, corner_storage, known_ids, known_points, intrinsic_mat):
+    current_corners = corner_storage[current_frame]
+
+    i_3d, i_2d = intersect_3d_2d(known_ids, known_points, current_corners.ids, current_corners.points)
+
+    success, rvec, tvec, inliers = cv2.solvePnPRansac(i_3d, i_2d, intrinsic_mat, distCoeffs=dist_coeffs)
+
+    if inliers is not None:
+        i_id_1, i_id_2 = intersect_indexes(known_ids, current_corners.ids)
+
+        outliers_ids_1 = np.delete(known_ids, i_id_1[inliers])
+        outliers_ids_2 = np.delete(current_corners.ids, i_id_2[inliers])
+
+        outliers_ids = np.union1d(outliers_ids_1, outliers_ids_2)
+    else:
+        outliers_ids = None
+
+    current_view = rodrigues_and_translation_to_view_mat3x4(rvec, tvec)
+
+    return current_view, outliers_ids
+
+
+def triangulate(known_frames, known_ids, known_view_mats, corner_storage, intrinsic_mat):
+    current_frame = known_frames[-1]
+    current_view = known_view_mats[current_frame]
+    current_corners = corner_storage[current_frame]
+
+    tr_points3d, tr_ids, tr_cos = (None, None, None)
+
+    angle_threshold = 0
+
+    for frame in known_frames:
+        corners = corner_storage[frame]
+        view = known_view_mats[frame]
+
+        correspondences = build_correspondences(corners, current_corners, known_ids)
+
+        if len(correspondences.ids) < 1:
+            continue
+
+        new_tr_points3d, new_tr_ids, new_tr_cos = triangulate_correspondences(
+            correspondences,
+            view,
+            current_view,
+            intrinsic_mat,
+            triangulation_parameters)
+
+        # angle = math.acos(new_tr_cos) * 180 / math.pi
+        #
+        # if angle < angle_threshold:
+        #     continue
+
+        if tr_points3d is None or len(new_tr_points3d) > len(tr_points3d):
+            tr_points3d = new_tr_points3d
+            tr_ids = new_tr_ids
+            tr_cos = new_tr_cos
+
+    return tr_points3d, tr_ids, tr_cos
+
+
+def retriangulate(known_frames, known_ids, known_view_mats, known_points, corner_storage, intrinsic_mat):
+
+    for (index, id) in enumerate(known_ids):
+        points_2d = []
+        view_mats = []
+
+        for frame in known_frames:
+            if id in corner_storage[frame].ids.flatten():
+                view_mats.append(known_view_mats[frame])
+                point_2d = corner_storage[frame].points[(corner_storage[frame].ids.flatten() == id)][0]
+                points_2d.append(point_2d)
+
+        if len(points_2d) >= 7:
+            new_point_3d = triangulate_3d_point(view_mats, points_2d, intrinsic_mat)
+            known_points[index] = new_point_3d
+
+
+def recalc_views(known_frames, known_ids, known_view_mats, known_points, corner_storage, intrinsic_mat):
+    for frame in known_frames:
+        current_corners = corner_storage[frame]
+
+        i_3d, i_2d = intersect_3d_2d(known_ids, known_points, current_corners.ids, current_corners.points)
+
+        success, rvec, tvec, inliers = cv2.solvePnPRansac(i_3d, i_2d, intrinsic_mat, distCoeffs=dist_coeffs)
+
+        if not success:
+            continue
+
+        new_view_mat = rodrigues_and_translation_to_view_mat3x4(rvec, tvec)
+
+        known_view_mats[frame] = new_view_mat
+
+
 def track_and_calc_colors(camera_parameters: CameraParameters,
                           corner_storage: CornerStorage,
                           frame_sequence_path: str,
@@ -92,8 +202,6 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         camera_parameters,
         rgb_sequence[0].shape[0]
     )
-
-    triangulation_parameters = TriangulationParameters(1, 0, 0)
 
     if known_view_1 is None or known_view_2 is None:
         known_view_1, known_view_2 = calc_init_frames(corner_storage, intrinsic_mat)
@@ -110,103 +218,58 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
     init_id_0 = known_view_1[0]
     init_id_1 = known_view_2[0]
 
-    view_mats = np.full(shape=frame_count, fill_value=None)
+    known_view_mats = np.full(shape=frame_count, fill_value=None)
 
-    view_mats[init_id_0] = preprevious_view
-    view_mats[init_id_1] = previous_view
+    known_view_mats[init_id_0] = preprevious_view
+    known_view_mats[init_id_1] = previous_view
 
-    ###
+    known_frames = [init_id_0, init_id_1]
+    known_ids = np.empty(0, dtype=int)
+    known_points = np.empty((0, 3))
 
-    # print('frames: ', known_view_1[0], known_view_2[0])
-    # print('1r', known_view_1[1].r_mat)
-    # print('2r', known_view_2[1].r_mat @ np.linalg.inv(known_view_1[1].r_mat))
-    # print('1t', known_view_1[1].t_vec)
-    # print('2t', (known_view_2[1].t_vec - known_view_1[1].t_vec) / np.linalg.norm(known_view_2[1].t_vec - known_view_1[1].t_vec))
+    ############
 
-    corners_0 = corner_storage[init_id_0]
-    corners_1 = corner_storage[init_id_1]
+    corner_counts = [len(corners.ids) for corners in corner_storage]
 
-    previous_corners = corners_1
+    frame_order = list(reversed(sorted(range(len(corner_counts)), key=lambda k: corner_counts[k])))
 
-    correspondences = build_correspondences(corners_0, corners_1)
+    for (i, current_frame) in enumerate(frame_order):
+        print(f"Calculating frame: {i} / {frame_count}")
+        if current_frame in [init_id_0, init_id_1]:
+            continue
 
-    tr_points3d, tr_ids, tr_cos = triangulate_correspondences(
-        correspondences,
-        view_mats[init_id_0],
-        view_mats[init_id_1],
-        intrinsic_mat,
-        triangulation_parameters)
+        new_tr_points3d, new_tr_ids, new_tr_cos = triangulate(known_frames, known_ids, known_view_mats, corner_storage, intrinsic_mat)
 
-    #########
+        if new_tr_points3d is not None:
+            is_new = np.logical_not(np.isin(new_tr_ids, known_ids))
+            known_ids = np.concatenate([known_ids, new_tr_ids[is_new]])
+            known_points = np.concatenate([known_points, new_tr_points3d[is_new]])
 
-    frame_order = np.array(range(0, frame_count))
+        current_view, outliers_ids = calc_view(current_frame, corner_storage, known_ids, known_points, intrinsic_mat)
 
-    np.random.shuffle(frame_order)
+        known_view_mats[current_frame] = current_view
+        known_frames.append(current_frame)
 
+        if i % 30 == 0:
+            retriangulate(known_frames, known_ids, known_view_mats, known_points, corner_storage, intrinsic_mat)
+            recalc_views(known_frames, known_ids, known_view_mats, known_points, corner_storage, intrinsic_mat)
 
-    with click.progressbar(frame_order,
-                           label='Calculating view_mats',
-                           length=len(frame_order)) as progress_bar:
-        for current_frame in progress_bar:
-            if current_frame in [init_id_0, init_id_1]:
-                continue
-
-            current_id = current_frame
-
-            current_corners = corner_storage[current_id]
-
-            i_3d, i_2d = intersect_3d_2d(tr_ids, tr_points3d, current_corners.ids, current_corners.points)
-
-            dist_coeffs = np.zeros((4, 1))
-            success, rvec, tvec, inliers = cv2.solvePnPRansac(i_3d, i_2d, intrinsic_mat, distCoeffs=dist_coeffs)
-
-            if inliers is not None:
-                i_id_1, i_id_2 = intersect_indexes(tr_ids, current_corners.ids)
-
-                outliers_ids_1 = np.delete(tr_ids, i_id_1[inliers])
-                outliers_ids_2 = np.delete(current_corners.ids, i_id_2[inliers])
-
-                outliers_ids = np.union1d(outliers_ids_1, outliers_ids_2)
-            else:
-                outliers_ids = None
-
-            current_view = rodrigues_and_translation_to_view_mat3x4(rvec, tvec)
-
-            # add new 3D points
-            correspondences = build_correspondences(previous_corners, current_corners, outliers_ids)
-            new_tr_points3d, new_tr_ids, new_tr_cos = triangulate_correspondences(
-                correspondences,
-                previous_view,
-                current_view,
-                intrinsic_mat,
-                triangulation_parameters)
-
-            is_new = np.logical_not(np.isin(new_tr_ids, tr_ids))
-
-            tr_ids = np.concatenate([tr_ids, new_tr_ids[is_new]])
-            tr_points3d = np.concatenate([tr_points3d, new_tr_points3d[is_new]])
-
-            # end of iteration
-            view_mats[current_id] = current_view
-
-            previous_view = current_view
-            previous_corners = current_corners
 
     ###
 
-    point_cloud_builder = PointCloudBuilder(tr_ids,
-                                            tr_points3d)
+    point_cloud_builder = PointCloudBuilder(known_ids,
+                                            known_points)
 
     calc_point_cloud_colors(
         point_cloud_builder,
         rgb_sequence,
-        view_mats,
+        known_view_mats,
         intrinsic_mat,
         corner_storage,
         5.0
     )
     point_cloud = point_cloud_builder.build_point_cloud()
-    poses = list(map(view_mat3x4_to_pose, view_mats))
+    poses = list(map(view_mat3x4_to_pose, known_view_mats))
     return poses, point_cloud
 
 
