@@ -329,7 +329,7 @@ def calc_init_frames(corner_storage: CornerStorage, intrinsic_mat):
                 pts1 = corner_storage[frame1].points[ids1]
                 pts2 = corner_storage[frame2].points[ids2]
 
-                if len(pts1) < 30:
+                if len(pts1) < 20 or len(pts2) < 20:
                     break
 
                 E, inliers = cv2.findEssentialMat(pts1, pts2, intrinsic_mat, cv2.RANSAC)
