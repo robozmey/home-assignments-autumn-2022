@@ -77,7 +77,7 @@ def calc_view(frame_queue, corner_storage, known_ids, known_points, intrinsic_ma
             max_corners = inliers_count
             current_frame = frame
 
-    print(max_corners)
+    # print(max_corners)
 
     current_corners = corner_storage[current_frame]
 
@@ -320,42 +320,51 @@ def calc_init_frames(corner_storage: CornerStorage, intrinsic_mat):
     step = 5
     max_angle = -1
 
-    for frame1 in range(0, frame_count, step):
-        for frame2 in range(frame1+step, frame_count, step):
+    for count_threshold in [120, 60, 10, 5]:
+        for frame1 in range(0, frame_count, step):
+            for frame2 in range(frame1+step, frame_count, step):
 
-            _, ids1, ids2 = np.intersect1d(corner_storage[frame1].ids.flatten(), corner_storage[frame2].ids.flatten(),
-                                           return_indices=True)
-            pts1 = corner_storage[frame1].points[ids1]
-            pts2 = corner_storage[frame2].points[ids2]
+                _, ids1, ids2 = np.intersect1d(corner_storage[frame1].ids.flatten(), corner_storage[frame2].ids.flatten(),
+                                               return_indices=True)
+                pts1 = corner_storage[frame1].points[ids1]
+                pts2 = corner_storage[frame2].points[ids2]
 
-            if len(pts1) < 30:
+                if len(pts1) < 30:
+                    break
+
+                E, inliers = cv2.findEssentialMat(pts1, pts2, intrinsic_mat, cv2.RANSAC)
+
+                _, hom_inliers = cv2.findHomography(pts1, pts2, cv2.RANSAC)
+
+                if hom_inliers.sum() >= inliers.sum() * 0.7:
+                    continue
+
+                counts, R_est, t_est, _ = cv2.recoverPose(E, pts1, pts2, intrinsic_mat, cv2.RANSAC)
+
+                vec_ones = np.array([1, 0, 0])
+                acos = np.dot(vec_ones, R_est @ vec_ones)
+                angle = np.arccos(np.clip(acos, -1.0, 1.0)) / math.pi * 180
+
+                if counts < count_threshold:
+                    continue
+
+                print(counts, min(len(pts1), len(pts2)))
+
+                if max_angle < angle:
+                    max_angle = angle
+                    known_view_2 = (frame2, Pose(R_est, t_est.reshape(-1)))
+                    known_view_1 = (frame1, Pose(np.eye(3), np.zeros(3)))
+                    max_counts = counts
+
+                # if max_counts < counts:
+                #     max_counts = counts
+                #     known_view_2 = (frame2, Pose(R_est, t_est.reshape(-1)))
+                #     known_view_1 = (frame1, Pose(np.eye(3), np.zeros(3)))
+
+                print(f"    at {frame1}, {frame2} angle: {angle}, max angle: {max_angle}, max_counts: {max_counts}")
+
+            if known_view_1 is not None:
                 break
-
-            E, inliers = cv2.findEssentialMat(pts1, pts2, intrinsic_mat, cv2.RANSAC)
-
-            _, hom_inliers = cv2.findHomography(pts1, pts2, cv2.RANSAC)
-
-            if hom_inliers.sum() >= inliers.sum() * 0.7:
-                continue
-
-            counts, R_est, t_est, _ = cv2.recoverPose(E, pts1, pts2, intrinsic_mat, cv2.RANSAC)
-
-            euler_angles = Rotation.from_matrix(R_est).as_euler("zyx", degrees=True)
-
-            angle = euler_angles.max()
-
-            # if counts < 10:
-            #     continue
-
-            # if max_angle < angle:
-            #     max_angle = angle
-            #     known_view_2 = (frame2, Pose(R_est, t_est.reshape(-1)))
-            #     known_view_1 = (frame1, Pose(np.eye(3), np.zeros(3)))
-
-            if max_counts < counts:
-                max_counts = counts
-                known_view_2 = (frame2, Pose(R_est, t_est.reshape(-1)))
-                known_view_1 = (frame1, Pose(np.eye(3), np.zeros(3)))
 
     return known_view_1, known_view_2
 
