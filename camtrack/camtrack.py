@@ -94,51 +94,48 @@ def calc_view(frame_queue, corner_storage, known_ids, known_points, intrinsic_ma
     return current_frame, current_view
 
 
-def calc_view_and_remove_outliers(frame_queue, corner_storage, known_ids, known_points, intrinsic_mat, global_inliers):
-    frames = list(frame_queue)
-    np.random.shuffle(frames)
-
-    min_error = 1e10
-    res_frame = None
-    res_view = None
-
-    # known_points_copy = known_points.copy()
-    # known_ids_copy = known_ids.copy()
-
-    for frame in frames:
-        flag = np.isin(corner_storage[frame].ids.flatten(), known_ids)
-
-        corners = corner_storage[frame]
-        ids = corners.ids[flag]
-
-        i_3d, i_2d = intersect_3d_2d(known_ids, known_points, corners.ids, corners.points)
-        success, rvec, tvec, inliers = cv2.solvePnPRansac(i_3d, i_2d, intrinsic_mat, None, reprojectionError=8.0,
-                                                          confidence=0.99,
-                                                          iterationsCount=100, flags=cv2.SOLVEPNP_ITERATIVE)
-        view_mat = rodrigues_and_translation_to_view_mat3x4(rvec, tvec)
-
-        error = compute_reprojection_errors(i_3d, i_2d, intrinsic_mat @ view_mat).mean()
-        outliers = np.delete(np.arange(len(i_3d)), inliers)
-        outliers_ids = ids[outliers]
-        outlier_flag = np.isin(known_ids, outliers_ids)
-        known_ids = known_ids[np.logical_not(outlier_flag)]
-        known_points = known_points[np.logical_not(outlier_flag)]
-
-        if error > 10:
-            continue
-
-        global_inliers.update(ids[inliers].flatten())
-
-        if error < min_error:
-            min_error = error
-            res_frame = frame
-            res_view = view_mat
-
-    if min_error < 10.0:
-        print(f"    Chosen {res_frame} frame ...")
-        return res_frame, res_view
-    else:
-        return calc_view(frame_queue, corner_storage, known_ids, known_points, intrinsic_mat, global_inliers)
+# def calc_view_and_remove_outliers(frame_queue, corner_storage, known_ids, known_points, intrinsic_mat, global_inliers):
+#     frames = list(frame_queue)
+#     np.random.shuffle(frames)
+#
+#     min_error = 1e10
+#     res_frame = None
+#     res_view = None
+#
+#     for frame in frames:
+#         flag = np.isin(corner_storage[frame].ids.flatten(), known_ids)
+#
+#         corners = corner_storage[frame]
+#         ids = corners.ids[flag]
+#
+#         i_3d, i_2d = intersect_3d_2d(known_ids, known_points, corners.ids, corners.points)
+#         success, rvec, tvec, inliers = cv2.solvePnPRansac(i_3d, i_2d, intrinsic_mat, None, reprojectionError=8.0,
+#                                                           confidence=0.99,
+#                                                           iterationsCount=100, flags=cv2.SOLVEPNP_ITERATIVE)
+#         view_mat = rodrigues_and_translation_to_view_mat3x4(rvec, tvec)
+#
+#         error = compute_reprojection_errors(i_3d, i_2d, intrinsic_mat @ view_mat).mean()
+#         outliers = np.delete(np.arange(len(i_3d)), inliers)
+#         outliers_ids = ids[outliers]
+#         outlier_flag = np.isin(known_ids, outliers_ids)
+#         known_ids = known_ids[np.logical_not(outlier_flag)]
+#         known_points = known_points[np.logical_not(outlier_flag)]
+#
+#         if error > 10:
+#             continue
+#
+#         global_inliers.update(ids[inliers].flatten())
+#
+#         if error < min_error:
+#             min_error = error
+#             res_frame = frame
+#             res_view = view_mat
+#
+#     if min_error < 10.0:
+#         print(f"    Chosen {res_frame} frame ...")
+#         return res_frame, res_view
+#     else:
+#         return calc_view(frame_queue, corner_storage, known_ids, known_points, intrinsic_mat, global_inliers)
 
 
 
