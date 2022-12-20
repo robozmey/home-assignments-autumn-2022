@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 
 import click
 import cv2
+from scipy.spatial.transform import Rotation
 
 from corners import CornerStorage, FrameCorners
 from data3d import CameraParameters, PointCloud, Pose
@@ -59,27 +60,85 @@ triangulation_parameters = TriangulationParameters(8.0, 0.5, 0.2)
 dist_coeffs = np.zeros((4, 1))
 
 
-def calc_view(frame_queue, corner_storage, known_ids, known_points, intrinsic_mat):
+def calc_view(frame_queue, corner_storage, known_ids, known_points, intrinsic_mat, global_inliers):
 
     current_frame = list(frame_queue)[0]
     max_corners = -1
 
-    for frame in frame_queue:
+    frames = list(frame_queue)
+    np.random.shuffle(frames)
+
+    for frame in frames:
         corners = corner_storage[frame]
 
-        corner_count = len(np.isin(corner_storage[frame].ids.flatten(), known_ids))
+        inliers_count = (np.isin(corners.ids.flatten(), known_ids)).sum()
 
-        if corner_count > max_corners:
-            max_corners = corner_count
+        if inliers_count > max_corners:
+            max_corners = inliers_count
+            current_frame = frame
+
+    print(max_corners)
 
     current_corners = corner_storage[current_frame]
-    i_3d, i_2d = intersect_3d_2d(known_ids, known_points, current_corners.ids, current_corners.points)
 
-    success, rvec, tvec, inliers = cv2.solvePnPRansac(i_3d, i_2d, intrinsic_mat, distCoeffs=dist_coeffs)
+    i_3d, i_2d = intersect_3d_2d(known_ids, known_points, current_corners.ids, current_corners.points)
+    success, rvec, tvec, inliers = cv2.solvePnPRansac(i_3d, i_2d, intrinsic_mat, None, reprojectionError=8.0, confidence=0.99,
+                                      iterationsCount=100, flags=cv2.SOLVEPNP_ITERATIVE)
+
+    global_inliers.update(inliers.flatten())
 
     current_view = rodrigues_and_translation_to_view_mat3x4(rvec, tvec)
 
+    print(f"    Chosen {current_frame} frame")
     return current_frame, current_view
+
+
+def calc_view_and_remove_outliers(frame_queue, corner_storage, known_ids, known_points, intrinsic_mat, global_inliers):
+    frames = list(frame_queue)
+    np.random.shuffle(frames)
+
+    min_error = 1e10
+    res_frame = None
+    res_view = None
+
+    # known_points_copy = known_points.copy()
+    # known_ids_copy = known_ids.copy()
+
+    for frame in frames:
+        flag = np.isin(corner_storage[frame].ids.flatten(), known_ids)
+
+        corners = corner_storage[frame]
+        ids = corners.ids[flag]
+
+        i_3d, i_2d = intersect_3d_2d(known_ids, known_points, corners.ids, corners.points)
+        success, rvec, tvec, inliers = cv2.solvePnPRansac(i_3d, i_2d, intrinsic_mat, None, reprojectionError=8.0,
+                                                          confidence=0.99,
+                                                          iterationsCount=100, flags=cv2.SOLVEPNP_ITERATIVE)
+        view_mat = rodrigues_and_translation_to_view_mat3x4(rvec, tvec)
+
+        error = compute_reprojection_errors(i_3d, i_2d, intrinsic_mat @ view_mat).mean()
+        outliers = np.delete(np.arange(len(i_3d)), inliers)
+        outliers_ids = ids[outliers]
+        outlier_flag = np.isin(known_ids, outliers_ids)
+        known_ids = known_ids[np.logical_not(outlier_flag)]
+        known_points = known_points[np.logical_not(outlier_flag)]
+
+        if error > 10:
+            continue
+
+        global_inliers.update(ids[inliers].flatten())
+
+        if error < min_error:
+            min_error = error
+            res_frame = frame
+            res_view = view_mat
+
+    if min_error < 10.0:
+        print(f"    Chosen {res_frame} frame ...")
+        return res_frame, res_view
+    else:
+        return calc_view(frame_queue, corner_storage, known_ids, known_points, intrinsic_mat, global_inliers)
+
 
 
 def triangulate(known_frames, known_ids, known_view_mats, corner_storage, intrinsic_mat):
@@ -107,10 +166,10 @@ def triangulate(known_frames, known_ids, known_view_mats, corner_storage, intrin
             intrinsic_mat,
             triangulation_parameters)
 
-        # new_tr_cos = min(1, new_tr_cos)
-        # angle = math.acos(new_tr_cos) * 180 / math.pi
-        # if tr_points3d is not None and angle < angle_threshold:
-        #     continue
+        new_tr_cos = min(1, new_tr_cos)
+        angle = math.acos(new_tr_cos) * 180 / math.pi
+        if tr_points3d is not None and angle < angle_threshold:
+            continue
 
         if tr_points3d is None or len(new_tr_points3d) > len(tr_points3d):
             tr_points3d = new_tr_points3d
@@ -127,23 +186,35 @@ def retriangulate(known_frames, known_ids, known_view_mats, known_points, corner
         view_mats = []
 
         for frame in known_frames:
-            if id in corner_storage[frame].ids.flatten():
+            corners = corner_storage[frame]
+            if id in corners.ids.flatten():
                 view_mats.append(known_view_mats[frame])
-                point_2d = corner_storage[frame].points[(corner_storage[frame].ids.flatten() == id)][0]
+                point_2d = corners.points[(corners.ids.flatten() == id)][0]
                 points_2d.append(point_2d)
 
-        if len(points_2d) >= 7:
+        if len(points_2d) >= 5:
             new_point_3d = triangulate_3d_point(view_mats, points_2d, intrinsic_mat)
             known_points[index] = new_point_3d
 
 
-def recalc_views(known_frames, known_ids, known_view_mats, known_points, corner_storage, intrinsic_mat):
+def recalc_views(known_frames, known_ids, known_view_mats, known_points, corner_storage, intrinsic_mat, global_inliers):
     for frame in list(known_frames):
         current_corners = corner_storage[frame]
+        # current_ids = current_corners.ids.flatten()
+        #
+        # flag = np.isin(current_ids, list(global_inliers))
+        # flag2 = np.isin(known_ids, current_ids[flag])
+        #
+        # i_3d = known_points[flag2]
+        #
+        # if len(i_3d) < 4:
+        #     continue
 
         i_3d, i_2d = intersect_3d_2d(known_ids, known_points, current_corners.ids, current_corners.points)
 
-        success, rvec, tvec, inliers = cv2.solvePnPRansac(i_3d, i_2d, intrinsic_mat, distCoeffs=dist_coeffs)
+        success, rvec, tvec, inliers = cv2.solvePnPRansac(i_3d, i_2d,
+                                    intrinsic_mat, None, reprojectionError=8.0, confidence=0.99,
+                                    iterationsCount=100, flags=cv2.SOLVEPNP_ITERATIVE)
 
         if not success:
             continue
@@ -180,6 +251,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
 
     init_id_1 = known_view_1[0]
     init_id_2 = known_view_2[0]
+    print(f"\nInit frames: {init_id_1}, {init_id_2}\n")
 
     known_view_mats = np.full(shape=frame_count, fill_value=None)
 
@@ -189,18 +261,16 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
     known_frames = [init_id_1, init_id_2]
     known_ids = np.empty(0, dtype=int)
     known_points = np.empty((0, 3))
+    global_inliers = set()
 
     ############
 
-    corner_counts = [len(corners.ids) for corners in corner_storage]
-
-    frame_order = list(reversed(sorted(range(len(corner_counts)), key=lambda k: corner_counts[k])))
     frame_queue = set(range(frame_count))
     frame_queue.remove(init_id_1)
     frame_queue.remove(init_id_2)
 
     for i in range(frame_count - 2):
-        print(f"Calculating frame: {i} / {frame_count}")
+        print(f"Calculating track frame: {i+1} / {frame_count-2}")
 
         new_tr_points3d, new_tr_ids, new_tr_cos = triangulate(known_frames, known_ids, known_view_mats, corner_storage, intrinsic_mat)
 
@@ -209,15 +279,17 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
             known_ids = np.concatenate([known_ids, new_tr_ids[is_new]])
             known_points = np.concatenate([known_points, new_tr_points3d[is_new]])
 
-        current_frame, current_view = calc_view(frame_queue, corner_storage, known_ids, known_points, intrinsic_mat)
+        print(f"    Point cloud size: {len(known_ids)}")
+
+        current_frame, current_view = calc_view_and_remove_outliers(frame_queue, corner_storage, known_ids, known_points, intrinsic_mat, global_inliers)
 
         frame_queue.remove(current_frame)
         known_view_mats[current_frame] = current_view
         known_frames.append(current_frame)
 
-        if i % 30 == 0:
+        if i % 20 == 0:
             retriangulate(known_frames, known_ids, known_view_mats, known_points, corner_storage, intrinsic_mat)
-            recalc_views(known_frames, known_ids, known_view_mats, known_points, corner_storage, intrinsic_mat)
+            recalc_views(known_frames, known_ids, known_view_mats, known_points, corner_storage, intrinsic_mat, global_inliers)
 
 
     ###
@@ -255,29 +327,34 @@ def calc_init_frames(corner_storage: CornerStorage, intrinsic_mat):
             pts1 = corner_storage[frame1].points[ids1]
             pts2 = corner_storage[frame2].points[ids2]
 
-            if len(pts1) < 50:
+            if len(pts1) < 40:
                 break
 
             E, inliers = cv2.findEssentialMat(pts1, pts2, intrinsic_mat, cv2.RANSAC)
 
             _, hom_inliers = cv2.findHomography(pts1, pts2, cv2.RANSAC)
 
-            if hom_inliers.sum() >= inliers.sum() * 0.7:
+            if hom_inliers.sum() >= inliers.sum() * 0.6:
                 continue
 
             counts, R_est, t_est, _ = cv2.recoverPose(E, pts1, pts2, intrinsic_mat, cv2.RANSAC)
 
+            euler_angles = Rotation.from_matrix(R_est).as_euler("zyx", degrees=True)
 
-
-            # print(counts)
+            angle = euler_angles.max()
 
             if counts < 10:
                 continue
 
-            if max_counts < counts:
-                max_counts = counts
+            if max_angle < angle:
+                max_angle = angle
                 known_view_2 = (frame2, Pose(R_est, t_est.reshape(-1)))
                 known_view_1 = (frame1, Pose(np.eye(3), np.zeros(3)))
+
+            # if max_counts < counts:
+            #     max_counts = counts
+            #     known_view_2 = (frame2, Pose(R_est, t_est.reshape(-1)))
+            #     known_view_1 = (frame1, Pose(np.eye(3), np.zeros(3)))
 
     return known_view_1, known_view_2
 

@@ -113,6 +113,7 @@ def _build_impl(frame_sequence: pims.FramesSequence,
 
     builder.set_corners_at_frame(0, corners)
     for frame, image_1 in enumerate(frame_sequence[1:], 1):
+        print(f"Calculating corners frame: {frame} / {len(frame_sequence[1:])}")
 
         p1, st, err = cv2.calcOpticalFlowPyrLK(np.uint8(image_0 * 255), np.uint8(image_1 * 255), p0, None, **lk_params)
 
