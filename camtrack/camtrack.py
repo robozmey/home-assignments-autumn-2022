@@ -200,7 +200,7 @@ def retriangulate(known_frames, known_ids, known_view_mats, known_points, corner
 
 def recalc_views(known_frames, known_ids, known_view_mats, known_points, corner_storage, intrinsic_mat, global_inliers):
     for frame in list(known_frames):
-        current_corners = corner_storage[frame]
+        corners = corner_storage[frame]
         # current_ids = current_corners.ids.flatten()
         #
         # flag = np.isin(current_ids, list(global_inliers))
@@ -211,7 +211,7 @@ def recalc_views(known_frames, known_ids, known_view_mats, known_points, corner_
         # if len(i_3d) < 4:
         #     continue
 
-        i_3d, i_2d = intersect_3d_2d(known_ids, known_points, current_corners.ids, current_corners.points)
+        i_3d, i_2d = intersect_3d_2d(known_ids, known_points, corners.ids, corners.points)
 
         success, rvec, tvec, inliers = cv2.solvePnPRansac(i_3d, i_2d,
                                     intrinsic_mat, None, reprojectionError=8.0, confidence=0.99,
@@ -288,7 +288,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         known_view_mats[current_frame] = current_view
         known_frames.append(current_frame)
 
-        if i % 20 == 0:
+        if i % 10 == 0:
             retriangulate(known_frames, known_ids, known_view_mats, known_points, corner_storage, intrinsic_mat)
             recalc_views(known_frames, known_ids, known_view_mats, known_points, corner_storage, intrinsic_mat, global_inliers)
 
@@ -320,7 +320,10 @@ def calc_init_frames(corner_storage: CornerStorage, intrinsic_mat):
     step = 5
     max_angle = -1
 
-    for count_threshold in [120, 60, 10, 5]:
+    for count_threshold in [100, 60, 10, 5]:
+
+        frames_found = 0
+
         for frame1 in range(0, frame_count, step):
             for frame2 in range(frame1+step, frame_count, step):
 
@@ -343,14 +346,14 @@ def calc_init_frames(corner_storage: CornerStorage, intrinsic_mat):
 
                 vec_ones = np.array([1, 0, 0])
                 acos = np.dot(vec_ones, R_est @ vec_ones)
-                angle = np.arccos(np.clip(acos, -1.0, 1.0)) / math.pi * 180
+                angle = abs(np.arccos(np.clip(acos, -1.0, 1.0)) / math.pi * 180)
 
                 if counts < count_threshold:
                     continue
 
-                print(counts, min(len(pts1), len(pts2)))
 
                 if max_angle < angle:
+                    frames_found += 1
                     max_angle = angle
                     known_view_2 = (frame2, Pose(R_est, t_est.reshape(-1)))
                     known_view_1 = (frame1, Pose(np.eye(3), np.zeros(3)))
@@ -363,8 +366,8 @@ def calc_init_frames(corner_storage: CornerStorage, intrinsic_mat):
 
                 print(f"    at {frame1}, {frame2} angle: {angle}, max angle: {max_angle}, max_counts: {max_counts}")
 
-            if known_view_1 is not None:
-                break
+        if frames_found > 0:
+            break
 
     return known_view_1, known_view_2
 
