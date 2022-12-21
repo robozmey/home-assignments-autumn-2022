@@ -90,7 +90,7 @@ def calc_view(frame_queue, corner_storage, known_ids, known_points, intrinsic_ma
 
     current_view = rodrigues_and_translation_to_view_mat3x4(rvec, tvec)
 
-    print(f"    Chosen {current_frame} frame")
+    print(f"    Chosen {current_frame} frame, inliers count {len(inliers)}")
     return current_frame, current_view
 
 
@@ -98,9 +98,13 @@ def calc_view_and_remove_outliers(frame_queue, corner_storage, known_ids, known_
     frames = list(frame_queue)
     # np.random.shuffle(frames)
 
+    error_threshold = 10
+
     min_error = 1000
     res_frame = None
     res_view = None
+    outliers_removed = 0
+    inliers_count = 0
 
     for frame in frames:
         flag = np.isin(corner_storage[frame].ids.flatten(), known_ids)
@@ -112,28 +116,41 @@ def calc_view_and_remove_outliers(frame_queue, corner_storage, known_ids, known_
         success, rvec, tvec, inliers = cv2.solvePnPRansac(i_3d, i_2d, intrinsic_mat, None, reprojectionError=8.0,
                                                           confidence=0.99,
                                                           iterationsCount=100, flags=cv2.SOLVEPNP_ITERATIVE)
+        # if len(inliers) < 80:
+        #     continue
+
+        if not success:
+            continue
+
         view_mat = rodrigues_and_translation_to_view_mat3x4(rvec, tvec)
 
         error = compute_reprojection_errors(i_3d, i_2d, intrinsic_mat @ view_mat).mean()
-        outliers = np.delete(np.arange(len(i_3d)), inliers)
-        outliers_ids = ids[outliers]
-        outlier_flag = np.isin(known_ids, outliers_ids)
-        known_ids = known_ids[np.logical_not(outlier_flag)]
-        known_points = known_points[np.logical_not(outlier_flag)]
 
-        if error > 10:
+        # if inliers is None:
+        #     inliers = []
+        #
+        # outliers = np.delete(np.arange(len(i_3d)), inliers)
+        # outliers_ids = ids[outliers]
+        # outlier_flag = np.isin(known_ids, outliers_ids)
+        # known_ids = known_ids[np.logical_not(outlier_flag)]
+        # known_points = known_points[np.logical_not(outlier_flag)]
+        # outliers_removed += outlier_flag.sum()
+
+        if error > error_threshold:
             continue
 
         if inliers is not None:
             global_inliers.update(corners.ids[i_ids2][inliers.flatten()].flatten())
 
         if error < min_error:
+            inliers_count = len(inliers)
             min_error = error
             res_frame = frame
             res_view = view_mat
 
-    if min_error < 10.0:
-        print(f"    Chosen {res_frame} frame ...")
+    print(f"    Removed {outliers_removed} / {len(known_ids)} outliers")
+    if min_error < error_threshold:
+        print(f"    Chosen {res_frame} frame, error {min_error}, inliers count {inliers_count}")
         return res_frame, res_view
     else:
         return calc_view(frame_queue, corner_storage, known_ids, known_points, intrinsic_mat, global_inliers)
