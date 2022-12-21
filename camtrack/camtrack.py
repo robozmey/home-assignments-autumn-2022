@@ -36,7 +36,7 @@ from _camtrack import (
 
 def intersect_3d_2d(ids3, points3d, ids2, points2d):
     _, i_ids3, i_ids2 = np.intersect1d(ids3, ids2, return_indices=True)
-    return points3d[i_ids3], points2d[i_ids2]
+    return points3d[i_ids3], points2d[i_ids2], i_ids3, i_ids2
 
 
 def intersect_indexes(ids_1, ids_2):
@@ -66,7 +66,7 @@ def calc_view(frame_queue, corner_storage, known_ids, known_points, intrinsic_ma
     max_corners = -1
 
     frames = list(frame_queue)
-    np.random.shuffle(frames)
+    # np.random.shuffle(frames)
 
     for frame in frames:
         corners = corner_storage[frame]
@@ -81,12 +81,12 @@ def calc_view(frame_queue, corner_storage, known_ids, known_points, intrinsic_ma
 
     current_corners = corner_storage[current_frame]
 
-    i_3d, i_2d = intersect_3d_2d(known_ids, known_points, current_corners.ids, current_corners.points)
+    i_3d, i_2d, _, i_ids2 = intersect_3d_2d(known_ids, known_points, current_corners.ids, current_corners.points)
     success, rvec, tvec, inliers = cv2.solvePnPRansac(i_3d, i_2d, intrinsic_mat, None, reprojectionError=8.0, confidence=0.99,
                                       iterationsCount=100, flags=cv2.SOLVEPNP_ITERATIVE)
 
     if inliers is not None:
-        global_inliers.update(inliers.flatten())
+        global_inliers.update(current_corners.ids[i_ids2][inliers.flatten()].flatten())
 
     current_view = rodrigues_and_translation_to_view_mat3x4(rvec, tvec)
 
@@ -94,48 +94,49 @@ def calc_view(frame_queue, corner_storage, known_ids, known_points, intrinsic_ma
     return current_frame, current_view
 
 
-# def calc_view_and_remove_outliers(frame_queue, corner_storage, known_ids, known_points, intrinsic_mat, global_inliers):
-#     frames = list(frame_queue)
-#     np.random.shuffle(frames)
-#
-#     min_error = 1e10
-#     res_frame = None
-#     res_view = None
-#
-#     for frame in frames:
-#         flag = np.isin(corner_storage[frame].ids.flatten(), known_ids)
-#
-#         corners = corner_storage[frame]
-#         ids = corners.ids[flag]
-#
-#         i_3d, i_2d = intersect_3d_2d(known_ids, known_points, corners.ids, corners.points)
-#         success, rvec, tvec, inliers = cv2.solvePnPRansac(i_3d, i_2d, intrinsic_mat, None, reprojectionError=8.0,
-#                                                           confidence=0.99,
-#                                                           iterationsCount=100, flags=cv2.SOLVEPNP_ITERATIVE)
-#         view_mat = rodrigues_and_translation_to_view_mat3x4(rvec, tvec)
-#
-#         error = compute_reprojection_errors(i_3d, i_2d, intrinsic_mat @ view_mat).mean()
-#         outliers = np.delete(np.arange(len(i_3d)), inliers)
-#         outliers_ids = ids[outliers]
-#         outlier_flag = np.isin(known_ids, outliers_ids)
-#         known_ids = known_ids[np.logical_not(outlier_flag)]
-#         known_points = known_points[np.logical_not(outlier_flag)]
-#
-#         if error > 10:
-#             continue
-#
-#         global_inliers.update(ids[inliers].flatten())
-#
-#         if error < min_error:
-#             min_error = error
-#             res_frame = frame
-#             res_view = view_mat
-#
-#     if min_error < 10.0:
-#         print(f"    Chosen {res_frame} frame ...")
-#         return res_frame, res_view
-#     else:
-#         return calc_view(frame_queue, corner_storage, known_ids, known_points, intrinsic_mat, global_inliers)
+def calc_view_and_remove_outliers(frame_queue, corner_storage, known_ids, known_points, intrinsic_mat, global_inliers):
+    frames = list(frame_queue)
+    # np.random.shuffle(frames)
+
+    min_error = 1000
+    res_frame = None
+    res_view = None
+
+    for frame in frames:
+        flag = np.isin(corner_storage[frame].ids.flatten(), known_ids)
+
+        corners = corner_storage[frame]
+        ids = corners.ids[flag]
+
+        i_3d, i_2d, _, i_ids2 = intersect_3d_2d(known_ids, known_points, corners.ids, corners.points)
+        success, rvec, tvec, inliers = cv2.solvePnPRansac(i_3d, i_2d, intrinsic_mat, None, reprojectionError=8.0,
+                                                          confidence=0.99,
+                                                          iterationsCount=100, flags=cv2.SOLVEPNP_ITERATIVE)
+        view_mat = rodrigues_and_translation_to_view_mat3x4(rvec, tvec)
+
+        error = compute_reprojection_errors(i_3d, i_2d, intrinsic_mat @ view_mat).mean()
+        outliers = np.delete(np.arange(len(i_3d)), inliers)
+        outliers_ids = ids[outliers]
+        outlier_flag = np.isin(known_ids, outliers_ids)
+        known_ids = known_ids[np.logical_not(outlier_flag)]
+        known_points = known_points[np.logical_not(outlier_flag)]
+
+        if error > 10:
+            continue
+
+        if inliers is not None:
+            global_inliers.update(corners.ids[i_ids2][inliers.flatten()].flatten())
+
+        if error < min_error:
+            min_error = error
+            res_frame = frame
+            res_view = view_mat
+
+    if min_error < 10.0:
+        print(f"    Chosen {res_frame} frame ...")
+        return res_frame, res_view
+    else:
+        return calc_view(frame_queue, corner_storage, known_ids, known_points, intrinsic_mat, global_inliers)
 
 
 
@@ -178,6 +179,7 @@ def triangulate(known_frames, known_ids, known_view_mats, corner_storage, intrin
 
 
 def retriangulate(known_frames, known_ids, known_view_mats, known_points, corner_storage, intrinsic_mat):
+    count_frame_retriangulated = 0
 
     for (index, id) in enumerate(known_ids):
         points_2d = []
@@ -193,9 +195,14 @@ def retriangulate(known_frames, known_ids, known_view_mats, known_points, corner
         if len(points_2d) >= 5:
             new_point_3d = triangulate_3d_point(view_mats, points_2d, intrinsic_mat)
             known_points[index] = new_point_3d
+            count_frame_retriangulated += 1
+
+    print(f"\nRecalculated {count_frame_retriangulated} / {len(known_frames)} views\n")
 
 
 def recalc_views(known_frames, known_ids, known_view_mats, known_points, corner_storage, intrinsic_mat, global_inliers):
+    count_view_recalced = 0
+
     for frame in list(known_frames):
         corners = corner_storage[frame]
         # current_ids = current_corners.ids.flatten()
@@ -208,7 +215,7 @@ def recalc_views(known_frames, known_ids, known_view_mats, known_points, corner_
         # if len(i_3d) < 4:
         #     continue
 
-        i_3d, i_2d = intersect_3d_2d(known_ids, known_points, corners.ids, corners.points)
+        i_3d, i_2d, _, _ = intersect_3d_2d(known_ids, known_points, corners.ids, corners.points)
 
         success, rvec, tvec, inliers = cv2.solvePnPRansac(i_3d, i_2d,
                                     intrinsic_mat, None, reprojectionError=8.0, confidence=0.99,
@@ -220,6 +227,10 @@ def recalc_views(known_frames, known_ids, known_view_mats, known_points, corner_
         new_view_mat = rodrigues_and_translation_to_view_mat3x4(rvec, tvec)
 
         known_view_mats[frame] = new_view_mat
+
+        count_view_recalced += 1
+
+    print(f"\nRecalculated {count_view_recalced} / {len(known_frames)} views\n")
 
 
 def track_and_calc_colors(camera_parameters: CameraParameters,
@@ -279,7 +290,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
 
         print(f"    Point cloud size: {len(known_ids)}")
 
-        current_frame, current_view = calc_view(frame_queue, corner_storage, known_ids, known_points, intrinsic_mat, global_inliers)
+        current_frame, current_view = calc_view_and_remove_outliers(frame_queue, corner_storage, known_ids, known_points, intrinsic_mat, global_inliers)
 
         frame_queue.remove(current_frame)
         known_view_mats[current_frame] = current_view
