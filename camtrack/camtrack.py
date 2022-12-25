@@ -29,6 +29,7 @@ from _camtrack import (
     project_points,
     compute_reprojection_errors,
     rodrigues_and_translation_to_view_mat3x4,
+    _calc_triangulation_angle_mask,
 )
 
 def intersect_3d_2d(ids3, points3d, ids2, points2d):
@@ -331,14 +332,20 @@ def calc_init_frames(corner_storage: CornerStorage, intrinsic_mat):
                     continue
 
                 counts, R_est, t_est, _ = cv2.recoverPose(E, pts1, pts2, intrinsic_mat, cv2.RANSAC)
-
-                vec_ones = np.array([1, 0, 0])
-                acos = np.dot(vec_ones, R_est @ vec_ones)
-                angle = abs(np.arccos(np.clip(acos, -1.0, 1.0)) / math.pi * 180)
-
                 if counts < count_threshold:
                     continue
 
+                view_mat1 = pose_to_view_mat3x4(Pose(np.eye(3), np.zeros(3)))
+                view_mat2 = pose_to_view_mat3x4(Pose(R_est, t_est.reshape(-1)))
+
+                known_view_mats = np.full(shape=frame_count, fill_value=None)
+                known_view_mats[frame1] = view_mat1
+                known_view_mats[frame2] = view_mat2
+                known_frames = [frame1, frame2]
+                known_ids = np.empty(0, dtype=int)
+                _, _, new_tr_cos = triangulate(known_frames, known_ids, known_view_mats, corner_storage, intrinsic_mat)
+
+                angle = abs(np.arccos(np.clip(new_tr_cos, -1.0, 1.0)) / math.pi * 180)
 
                 if max_angle < angle:
                     frames_found += 1
